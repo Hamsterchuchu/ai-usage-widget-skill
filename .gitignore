@@ -1,0 +1,15 @@
+/artifacts/
+/.runtime/
+*.exe
+*.lnk
+*.zip
+**/__pycache__/
+**/usage.json
+**/usage.json.tmp
+**/position.json
+**/settings.json
+**/settings.json.tmp
+**/widget-status.json
+**/native-error.txt
+**/*verification.json
+.DS_Store

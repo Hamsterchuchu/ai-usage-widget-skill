@@ -1,0 +1,4 @@
+interface:
+  display_name: "AI Usage Widget"
+  short_description: "Build and customize Codex and Claude desktop usage cards"
+  default_prompt: "Use $ai-usage-widget to set up a desktop usage card and customize its appearance."

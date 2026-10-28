@@ -1,0 +1,16 @@
+name: Verify
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Build and verify widget
+        shell: pwsh
+        run: ./tests/Test-Widget.ps1
+      - name: Verify Claude bridge behavior
+        run: node --test tests/bridge.test.mjs

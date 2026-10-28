@@ -1,0 +1,108 @@
+// Authentication stays with the engine. No token, cookie, transcript, or model access.
+const OUTPUT = __USAGE_OUTPUT_JSON__
+const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage'
+let nextAllowed = 0
+let lastSnapshot = null
+let busy = false
+
+export function normalizeWindows(windows) {
+  if (!Array.isArray(windows)) return []
+  return windows
+    .filter(w => w && ['five_hour', 'seven_day'].includes(w.kind)
+      && typeof w.percentUsed === 'number' && Number.isFinite(w.percentUsed))
+    .map(w => ({
+      kind: w.kind,
+      percentUsed: Math.min(100, Math.max(0, w.percentUsed)),
+      resetsAt: typeof w.resetsAt === 'string' ? w.resetsAt : null,
+    }))
+}
+
+export function parseUsage(raw) {
+  const candidates = []
+  for (const kind of ['five_hour', 'seven_day']) {
+    const row = raw?.[kind]
+    if (row && typeof row === 'object') candidates.push({ kind, ...row })
+  }
+  if (Array.isArray(raw?.limits)) candidates.push(...raw.limits)
+  const windows = []
+  for (const row of candidates) {
+    if (!row || !['five_hour', 'seven_day'].includes(row.kind)) continue
+    const percentUsed = row.utilization ?? row.percentUsed ?? row.percent
+    const normalized = normalizeWindows([{ kind: row.kind, percentUsed,
+      resetsAt: row.resets_at ?? row.resetsAt }])[0]
+    if (normalized && !windows.some(w => w.kind === normalized.kind)) windows.push(normalized)
+  }
+  return windows
+}
+
+async function refresh($) {
+  const now = await $.clock.now()
+  if (busy || now < nextAllowed) return
+  busy = true
+  nextAllowed = now + 120000
+  let error = null
+  try {
+    const authorization = await $.session.authorize()
+    if (!authorization || authorization.kind !== 'bearer') {
+      error = '사용량 조회 인증을 사용할 수 없음'
+    } else {
+      const response = await $.http.fetch(USAGE_URL, {
+        auth: authorization.handle,
+        headers: { 'anthropic-beta': 'oauth-2025-04-20' },
+      })
+      if (response.ok) {
+        lastSnapshot = { schema: 1, source: 'anthropic-usage', sampledAt: now,
+          reason: 'usage-api', windows: parseUsage(JSON.parse(response.text)) }
+      } else {
+        error = `사용량 조회 HTTP ${response.status}`
+        if (response.status === 429) {
+          const seconds = Number(response.headers['retry-after'])
+          nextAllowed = now + Math.max(120000, Number.isFinite(seconds) ? seconds * 1000 : 300000)
+        } else if (response.status === 401 || response.status === 403) {
+          nextAllowed = now + 600000
+        }
+      }
+    }
+  } catch {
+    // Do not persist request headers, handles, raw errors, or response bodies.
+    error = '사용량 조회 연결 확인 필요'
+    nextAllowed = now + 300000
+  } finally {
+    busy = false
+  }
+  const snapshot = lastSnapshot ?? { schema: 1, source: 'anthropic-usage', sampledAt: null,
+    reason: 'waiting', windows: [] }
+  await $.fs.write(OUTPUT, JSON.stringify({ ...snapshot, error }))
+}
+
+export function register(on) {
+  on('session.start', async ($, e, next) => {
+    await $.command.register({
+      name: 'usage-widget-status',
+      description: 'Refresh the local Cowork usage companion without a model call',
+    })
+    await refresh($)
+    // Keep the feed alive when the person switches from Code to Cowork.
+    $.clock.every(120000, async () => { await refresh($) })
+    return next(e)
+  })
+
+  on('session.attach', async ($, e, next) => {
+    const result = await next(e)
+    await refresh($)
+    return result
+  })
+
+  on('session.measure', async ($, e, next) => {
+    await refresh($)
+    return next(e)
+  })
+
+  on('command.run', { command: 'usage-widget-status' }, async ($) => {
+    await refresh($)
+    const windows = lastSnapshot?.windows ?? []
+    return { text: windows.length
+      ? windows.map(w => `${w.kind}: ${w.percentUsed}%`).join(' · ')
+      : '사용량 조회 대기: 위젯에 연결 상태가 표시됩니다.' }
+  })
+}
